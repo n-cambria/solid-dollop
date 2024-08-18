@@ -1,0 +1,319 @@
+---
+title: "5301 COVID Report - Relative Performance of Colorado"
+author: "Nick C"
+date: "2024-08-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+#The following packages are required; commented out by default if already installed
+
+# install.packages("ggplot2","dplyer","stringr","readr","tidyr","lubridate")
+
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(dplyr)
+library(stringr)
+library(readr)
+library(tidyr)
+library(lubridate)
+```
+
+```{r import_and_adjust, echo=FALSE, cache=TRUE, include=FALSE}
+
+# import data
+url_in <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/"
+
+file_names <- c("time_series_covid19_confirmed_global.csv","time_series_covid19_deaths_global.csv","time_series_covid19_confirmed_US.csv","time_series_covid19_deaths_US.csv")
+
+urls <- str_c(url_in,file_names)
+
+# Construct initial variables
+global_cases <- read_csv(urls[1])
+global_deaths <- read_csv(urls[2])
+US_cases <- read_csv(urls[3])
+US_Deaths <- read_csv(urls[4])
+
+# Focusing on US statistics
+# global_cases <- global_cases %>%
+#   pivot_longer(cols = -c(`Province/State`, `Country/Region`, Lat, Long),
+#                names_to = "date",
+#                values_to = "cases") %>%
+#   select(-c(Lat,Long))
+# 
+# global_deaths <- global_deaths %>%
+#   pivot_longer(cols = -c(`Province/State`, `Country/Region`, Lat, Long),
+#                names_to = "date",
+#                values_to = "deaths") %>%
+#   select(-c(Lat,Long))
+
+
+# Format US variables to be easier to parse
+US_Cases <- US_cases %>%
+  select(-c(Lat,Long_,Country_Region,
+  iso2,iso3,UID,code3,FIPS,Combined_Key)) %>%
+  rename(County = Admin2, State = Province_State) %>%
+  pivot_longer(cols = -c(County, State),
+               names_to = "Date",
+               values_to = "Cases")
+
+US_Deaths <- US_Deaths %>%
+  select(-c(Lat,Long_,Country_Region,
+  iso2,iso3,UID,code3,FIPS,Combined_Key)) %>%
+  rename(County = Admin2, State = Province_State) %>%
+  pivot_longer(cols = -c(County, State, Population),
+               names_to = "Date",
+               values_to = "Deaths")
+
+# Extract CO details and separate from rest of states
+CO_Cases <- US_Cases[US_Cases$State == 'Colorado',]
+CO_Deaths <- US_Deaths[US_Deaths$State == 'Colorado',]
+
+Rest_Cases <- US_Cases[US_Cases$State != 'Colorado',]
+Rest_Deaths <- US_Deaths[US_Deaths$State != 'Colorado',]
+
+# Generate dummy variables to calculate total population
+unique_population_data <- Rest_Deaths %>%
+  distinct(County, State, .keep_all = TRUE)
+total_population <- sum(unique_population_data$Population, na.rm = TRUE)
+unique_co_pop <- CO_Deaths %>%
+  distinct(County, State, .keep_all = TRUE)
+CO_Pop <- sum(unique_co_pop$Population, na.rm = TRUE)
+```
+
+
+
+## Introduction and Scope
+
+The purpose of the following analysis is to compare the statistics of Colorado during the COVID-19 pandemic to those of the rest of the nation.  Could it be said that Colorado faired better?  Worse?  Is there a significant difference at all?  The Johns Hopkins COVID-19 dataset was imported for this analysis, and the US statistics were split into two differing variables: `CO_Cases` and `Rest_Cases`.  The same was done for the deaths statistics.
+
+```{r view, echo=FALSE}
+
+head(CO_Cases)
+head(Rest_Cases)
+```
+
+## Exploration and Analysis
+
+### Instinctive Metric
+The simplest metric one may think to examine is the straight death rate as a proportion of population.  The imported dataframes house a 'Deaths' column which is cumulative; the deaths in a particular county on a given date represent the total deaths in that county up until that date.  The total deaths for Colorado and the rest of the country were calculated based on the deaths tallied by 9/9/2021.  We can compare the two rates with a simple bar chart:
+
+
+
+```{r deathrate, echo=FALSE}
+
+# Find last entry in dataset
+most_recent_date <- CO_Deaths %>%
+  summarize(max_date = max(Date, na.rm = TRUE)) %>%
+  pull(max_date)
+# Not actually most recent date, but any date suffices here
+# Filter df to show only this date since 'Deaths' is cumulative
+CO_Deaths_most_recent <- CO_Deaths %>%
+  filter(Date == most_recent_date)
+
+Rest_Deaths_most_recent <- Rest_Deaths %>%
+  filter(Date == most_recent_date)
+# Calculate total deaths for CO and rest of country
+CO_Tot_Deaths <- sum(CO_Deaths_most_recent$Deaths, na.rm = TRUE)
+Rest_Tot_Deaths <- sum(Rest_Deaths_most_recent$Deaths, na.rm = TRUE)
+
+#Calculate rate
+
+CO_Rate <- CO_Tot_Deaths/CO_Pop
+Rest_Rate <- Rest_Tot_Deaths/total_population
+
+# Create Dataframe of rates for plotting
+
+rates <- data.frame(loc=c("Colorado","Remaining States"),
+                    rate=c(CO_Rate,Rest_Rate))
+
+ggplot(rates, aes(x=loc, y=rate, fill=loc)) +
+  geom_bar(stat="identity") +
+  geom_text(aes(label=round(rate,5)),vjust=1.6, color="white",
+            position=position_dodge(0.9), size=8) +
+  labs(title="Comparative Death Rate as of 9/9/2021",
+       x="Region",
+       y="Death Rate",
+       fill="Region")+
+  theme_minimal()
+```
+
+We can see that, while both are fairly low in the grand scheme of things, the death rate of Colorado is substantially lower than that of the remaining states.  Naively, one could conclude that since less Coloradans died than the average person living elsewhere, Colorado must have faired better than the rest of the nation.  This is a reasonable conclusion, but it is not particularly helpful.  Lets examine the rate of deaths over time, and compare this evolution between Colorado, and the remaining states.
+
+### Evolution of Death Rate
+
+```{r join_and_compare, echo=FALSE, message=FALSE, warning=FALSE}
+# Join cases and deaths frames into single frames
+CO_Stats <- CO_Cases %>% 
+  full_join(CO_Deaths) %>% 
+  mutate(Date = mdy(Date)) %>%
+  group_by(Date) %>%
+  summarize(Cases = sum(Cases), 
+            Deaths = sum(Deaths), 
+            Population = sum(Population)) %>%
+  mutate(Rate = Deaths/Population, Infection = Cases/Population) %>%
+  mutate(Source = "CO_Stats")
+Rest_Stats <- Rest_Cases %>% 
+  full_join(Rest_Deaths) %>% 
+  mutate(Date = mdy(Date)) %>%
+  group_by(State, Date) %>%
+  summarize(Cases = sum(Cases),
+            Deaths = sum(Deaths),
+            Population = sum(Population))%>%
+  mutate(Rate = Deaths/Population, Infection = Cases/Population) %>%
+  mutate(Source = "Rest_Stats")
+
+# Create combined stat block for plotting
+combined_stats <- bind_rows(Rest_Stats, CO_Stats)
+
+ggplot(combined_stats, aes(x = Date, y = Rate, color = Source)) +
+  geom_point(size=0.05) +
+  scale_color_manual(values = c("Rest_Stats" = "lightblue", 
+                                "CO_Stats" = "red")) +
+  guides(color = guide_legend(override.aes = list(size = 3))) +
+  labs(
+    title = "Comparison of Rates Over Time",
+    x = "Date",
+    y = "Rate",
+    color = "Source"
+  ) +
+  theme_minimal()
+
+
+```
+
+
+From this plot, we can see that the death rate within Colorado is initially higher than most states, but by 2021 the majority of states pass it and remain higher.  This in part bolsters and dispels our earlier naive conclusion; while Colorado had a lower death rate than many states consistently, we can see that the rate was much higher than other states in mid 2020.  
+
+### Infection Rate vs. Death Rate
+
+We may ask, then, was the rate of infection higher in this time period as well?  Does it correlate and grow in a similar fashion?  We can compare the death rate and infection rate with a similar graph.
+
+```{r rate_comp, echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(CO_Stats, aes(x=Date, y=Infection)) +
+  geom_point(aes(color = "Infection Rate"), size=0.2) +
+  geom_line(aes(color = "Infection Rate")) +
+  geom_point(aes(y=Rate, color="Death Rate"), size=0.2) +
+  geom_line(aes(y=Rate, color="Death Rate")) +
+  scale_y_log10() +
+  guides(color = guide_legend(override.aes = list(size = 3))) +
+  scale_color_manual(values = c("Infection Rate" = "blue", 
+                                "Death Rate" = "red")) +
+  labs(
+    title = "Comparison of Infection Rate to Death Rate in Colorado",
+    x = "Date",
+    y = "Rate (log10 Scaling)",
+    color = "Type of Rate"
+  ) +
+  theme_minimal()
+
+```
+
+Here the y axis was scaled in Log 10 to ensure readability.  From this plot, we see that the death rate follows the infection rate almost exactly.  This is of no particular surprise of course, but it does allow us to presume that the periods of time in which the death rate spiked correlated to a similar spiking of overall infection rate and therefore number of cases logged.  After rough saturation of the population in terms of infection, both rates leveled off.  From this we can deduce that the equilibrium infection and death rate were more or less reached by 2022.
+
+### Novel Infections
+
+By plotting the new cases in Colorado alongside the new cases elsewhere, perhaps we can deduce approximate marginal performance of containment efforts.
+
+```{r new_infections, echo=FALSE, message=FALSE, warning=FALSE}
+CO_Stats <- CO_Stats %>%
+  mutate(New_Cases = Cases - lag(Cases),
+         New_Deaths = Deaths - lag(Deaths))
+
+Rest_Stats <- Rest_Stats %>%
+  mutate(New_Cases = Cases - lag(Cases),
+         New_Deaths = Deaths - lag(Deaths))
+
+combined_stats <- bind_rows(Rest_Stats, CO_Stats)
+
+ggplot(combined_stats, aes(x=Date, y=New_Cases, color=Source)) +
+  geom_point(size = 0.3) +
+  labs(
+    title = "Comparison of New Cases",
+    x = "Date",
+    y = "Number of New Cases"
+  ) +
+  scale_color_manual(values = c("Rest_Stats" = "lightblue", 
+                                "CO_Stats" = "red")) +
+  guides(color = guide_legend(override.aes = list(size = 3))) +
+  theme_minimal()
+
+
+```
+
+In this plot, we can identify noteworthy trends.  There is a significant spike in new cases nationwide as the year rolls over from 2020 to 2021, and again near end of year 2021.  We can surmise that this is due to the holidays.  During this rough period of time, people tend to travel and see others that they ordinarily don't interact with.  As such, it is of little surprise that we'd see a spike in cases during and shortly after this novel exposure.
+
+We can also see that Colorado was effectively immune from other secondary spikes visible in the plot; the number of new cases after 2022 is also consistently lower than the majority of the rest of the country.  We can, from this, conclude one of two things:
+
+1. After 2022, the population of people able to be infected decreased due to either herd immunity or immunization.
+2. After 2022, efforts to reduce new infections instated by the Colorado health authorities successfully abated novel infections.
+
+Causation is always difficult to be certain of, but it seems likely that both of these conclusions are in some part true, and each works with the other.  All of the above examinations corroborate our initial conclusion; Colorado generally faired better than other states during the pandemic.
+
+## Modeling of Death Rate as a Function of Infection Rate
+
+Earlier it was noted that the death rate almost exactly follows the shape of the infection rate curve.  We can model the Death Rate as a function of the Infection Rate to better establish how close these two characteristics behave.
+
+```{r modeling, echo=FALSE, message=FALSE, warning=FALSE}
+Rest_Agg <- Rest_Stats %>%
+  group_by(Date) %>%
+  summarize(Cases = sum(Cases),
+            Deaths = sum(Deaths),
+            Population = sum(Population)) %>%
+  mutate(New_Cases = Cases - lag(Cases),
+         New_Deaths = Deaths - lag(Deaths))
+
+CO_Mod <- lm(Rate ~ Infection, data = CO_Stats)
+# Rest_Mod <- lm(Deaths ~ New_Cases, data = Rest_Agg)
+
+CO_W_Mod <- CO_Stats %>%
+  drop_na() %>%
+  mutate(pred = predict(CO_Mod, newdata = .))
+# Rest_W_Mod <- Rest_Agg %>% 
+#   drop_na() %>%
+#   mutate(pred = predict(Rest_Mod, newdata = .))
+
+CO_W_Mod %>% ggplot() +
+  geom_point(aes(x = Infection, y = Rate, color = "Actual"), size = 0.5) +
+  geom_point(aes(x = Infection, y = pred, color = "Predicted"), size = 0.5) +
+  scale_color_manual(values = c("Actual" = "blue", "Predicted" = "red")) +
+   guides(color = guide_legend(override.aes = list(size = 3))) +
+  labs(
+    title="Predicted Death Rate vs. Actual Death Rate",
+    x="Infection Rate",
+    y="Death Rate",
+    color="Predicted or Actual Death Rate"
+  ) +
+  theme_minimal()
+```
+
+Unsurprisingly, the death rate follows the infection rate very closely; the linear model appears to accurately capture the trend in their correlation.  While this is expected, the degree to which these agree is noteworthy.  Checking on the output of the model directly, we can observe its p-value.
+
+```{r pvalue, echo=FALSE}
+summary(CO_Mod)
+
+```
+We can see that the p-value is exceptionally low; nearly one part in 22 Trillion.  This suggests extreme agreement with the model, and clear evidence that the death rate is defined principally by the infection rate.  While in some instances, the death rate was higher than one would expect based on the rate of infection, it overwhelmingly followed a linear-esque correlation.
+
+
+
+
+
+
+## Conclusion
+
+It is observed that Colorado weathered the storm of COVID-19 better than other states in terms of mortality and infection.  The data suggests that new cases were generally lower than in other states, and death and infection rates were similarly lower.  While this may be due to general health of the population, this is likely also due to compliance with mitigation efforts.
+
+Compliance, or lack thereof, is not measured within the data, however.  The data is biased towards entities which reported COVID-19 infections and deaths promptly and accurately.  Having grown up in Delta County in Colorado, I find it unlikely that the number of cases and deaths were logged as carefully as they were in Boulder or Denver counties.  This is, of course, due to the rampant politicization of the pandemic as it unfolded.  Because the general demographic base of rural counties such as Weld and Delta Counties were inclined to downplay the severity of the pandemic, while outright refusing compliance with mitigation efforts, the reported deaths may not accurately reflect the true number of deaths in these counties attributable to COVID-19.
+
+Despite this noteworthy bias to the data, the sheer volume lends itself to effective and rigorous analysis.  Further inquiry into how individual counties within Colorado performed compared to the state as a whole would likely reveal similarly interesting trends.  Another avenue of approach which may be interesting is comparing counties within one state to counties within another that have similar economic prosperity or population demographics.  Such analyses could readily be performed analogous to that exhibited here, but is left to others at their own leisure.
+
+
+
+
+
+
+
+
+
