@@ -1,0 +1,201 @@
+---
+title: "DSTA 5301 NYPD Shootings - Preliminary Exploration of Event Time"
+author: "Nick C"
+date: "2024-08-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning=FALSE,message=FALSE)
+library(ggplot2)
+library(dplyr)
+
+```
+*Note - All code chunks are included due to the request that the analysis be reproducable based on the knitted document alone; any 'professional' implementation of this document would omit many of the code chunks to enhance readability.*
+
+
+## Introduction and Processing
+The NYPD Shooting Incident data set is a repository of every shooting that was logged going back to 2006.  Due to the extremely high population of the city, this data set is vast and thus may harbor insights which may be extrapolated to general cases in other locales.
+
+The following code imports the data set in its raw form and caches it locally to avoid excess server queries.
+```{r import, cache=TRUE}
+nypd_shootings <- readr::read_csv("https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD")
+
+```
+Examining this .csv file, some columns are more meaningful than others; of these, the coordinate features, incident key, and precinct are of little interest in this particular case.  The borough of occurrence, date, time, and demographic details are more ubiquitously insightful, and will therefore be the primary focus of this analysis.  Further, the date column can be split into Month and Year columns to allow one to analyze monthly trends as each year progresses, and the time column will be adjusted to the more common HH:MM:SS format.  In addition to these changes, the location columns and perpetrator demographics will be removed due to the significant proportion of missing entries in these columns.
+
+```{r split_dates, echo=TRUE, results='hide'}
+
+nypd_shootings$OCCUR_DATE <- as.Date(nypd_shootings$OCCUR_DATE, format = "%m/%d/%Y")
+nypd_shootings <- transform(nypd_shootings, MONTH = format(OCCUR_DATE, "%m"), YEAR = format(OCCUR_DATE, "%y"))
+
+
+```
+```{r col_removal}
+nypd_shootings <- subset(nypd_shootings, select = -c(INCIDENT_KEY, PRECINCT, JURISDICTION_CODE, STATISTICAL_MURDER_FLAG, X_COORD_CD, Y_COORD_CD, Latitude, Longitude, Lon_Lat, LOC_OF_OCCUR_DESC, LOC_CLASSFCTN_DESC, LOCATION_DESC, PERP_AGE_GROUP, PERP_SEX, PERP_RACE))
+
+raw_time <- as.numeric(nypd_shootings$OCCUR_TIME)  
+nypd_shootings$OCCUR_TIME <- sprintf(
+  "%02d:%02d:%02d",
+  raw_time %/% 3600,                 # Hours
+  (raw_time %% 3600) %/% 60,        # Minutes
+  raw_time %% 60                    # Seconds
+)
+```
+
+The output of this code chunk shows that the Month and Year columns still have missing entries; importing the .csv above informed us that there are 28562 total rows in the data frame.  The code `sum(is.na(nypd_shootings$MONTH))` tells us that of these, 17483 have no date attached to them.  While dropping these rows will reduce the size of the data set by roughly 61%, the resulting data will still have a healthy 11079 entries; plenty of information to work with.  The following code will accomplish this, leaving us with an intact dataset, ready to be explored.
+
+```{r drop_na}
+nypd_shootings <- na.omit(nypd_shootings)
+
+head(nypd_shootings)
+```
+
+## Visualization of Time-Based Trends
+
+While many questions of interest could be explored with this data set, here we will focus on preliminary characteristics of the data based on time of occurrence.  One would presume that many incidents occur late at night, potentially fueled by alcohol or other such factors; viewing the totality of the incidents by time of day, we observe that this is true.  The following code adjusts the `OCCUR_TIME` feature to acquire numeric boxes representing hours of the day.
+
+```{r transform_for_hist}
+shootings_by_hour <- nypd_shootings %>%
+  mutate(time_of_day = as.POSIXct(OCCUR_TIME, format = "%H:%M:%S"),
+         hour_of_day = cut(as.numeric(format(time_of_day, "%H")),
+                           breaks = seq(0, 24, by = 1),  # 24 intervals
+                           labels = paste0(sprintf("%02d", 0:23), ":00"),
+                           include.lowest = TRUE,
+                           right = FALSE))
+```
+
+The following code displays the total count of events by time of day as a histogram and we can see that a substantial number of incidents occur between 9:00 PM and 4:00 AM.
+
+```{r histogram_1}
+ggplot(shootings_by_hour, aes(x = hour_of_day)) +
+  geom_histogram(stat = 'count',color="black",fill="lightblue") +
+  labs(title = "Shootings by Hour",
+       x = "Hour of Day",
+       y = "Number of Shootings Recorded") +
+  theme_light() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_x_discrete(drop = FALSE)
+
+```
+
+Expanding on this, we can examine what proportion of shootings occurred between 9:00 PM and 4:00 AM each year; from the plot below, we see that roughly 50% of every shooting logged between 2010 and 2022 occurred in this late-night to early-morning time period.  We also happen to see that the total number of shootings was trending downward, before a steep spike starting in 2020, likely due to the outbreak of Covid-19.
+
+
+
+
+```{r compare_bar}
+# Sequester time of occurrence into two regions; 9pm to 4am and else
+nypd_shootings_transformed <- nypd_shootings %>%
+  mutate(
+    time_of_day = as.POSIXct(OCCUR_TIME, format = "%H:%M:%S"),
+    hour_of_day = as.numeric(format(time_of_day, "%H")),
+    time_region = case_when(
+      hour_of_day >= 21 | hour_of_day < 5 ~ "21:00 - 04:00",
+      TRUE ~ "05:00 - 20:00"))
+
+# Separate data by year from 2006 to 2022
+nypd_shootings_combined <- nypd_shootings_transformed %>%
+  filter(YEAR %in% 6:22) %>%
+  mutate(year_label = as.character(YEAR))
+
+# Calculate proportion of events per year which occurred between 9pm and 4am
+nypd_shootings_summary <- nypd_shootings_combined %>%
+  group_by(year_label, time_region) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  group_by(year_label) %>%
+  mutate(
+    total_count = sum(count),
+    proportion = count / total_count,
+    ypos = 0.5*count) %>%
+  ungroup()%>%
+  mutate(label = ifelse(time_region == "21:00 - 04:00", paste0(sprintf("%1.1f", proportion * 100), "%"), NA))
+
+# Plot results as a stacked bar chart
+ggplot(nypd_shootings_summary, aes(x = year_label, y = count, fill = time_region)) +
+  geom_bar(stat = "identity", position = "stack") +
+  geom_text(aes(label = label, y = ypos), size = 2.5) +
+  labs(
+    title = "Shootings by Time Interval and Year",
+    x = "Year",
+    y = "Number of Shootings",
+    fill = "Time Interval"
+  ) +
+  theme_light()
+
+```
+
+Taking a closer look at the total count trends, we can generate a simple scatter plot showing the number of shootings in each year.  From the bar chart, we expect the general trend to be linearly decreasing from 2010 to 2019, and the (rather intense) increase from 2017 to 2022 to be potentially exponential.  Below, the plot shows the counts in red, and the two differing expected models in blue and green.
+
+```{r modeling_plot}
+
+# Convert year_label to real number for ease of use
+nypd_shootings_summary$year_label <- as.numeric(as.character(nypd_shootings_summary$year_label))
+
+# Subset data based on visual trend
+subset1 <- subset(nypd_shootings_summary, year_label >= 10 & year_label <= 19)
+subset2 <- subset(nypd_shootings_summary, year_label >= 17 & year_label <= 22)
+
+# Plot number of shootings total per year with trend
+ggplot(nypd_shootings_summary, aes(x = year_label, y = total_count)) +
+  geom_point(color = "red") +
+  geom_smooth(data = subset1,
+              aes(x = year_label, y = total_count), 
+              method = "lm", 
+              se = FALSE, 
+              color = "blue") +
+  geom_smooth(data = subset2, 
+              aes(x = year_label, y = total_count), 
+              method = "nls", 
+              formula = y ~ exp(a + b * x),
+              se = FALSE, color = "green", 
+              linetype = "dashed") +
+  labs(
+    title = "Shootings per Year",
+    x = "Year (as Numeric)",
+    y = "Number of Shootings"
+  )
+```
+
+From the plot, we can then directly fit models and observe their p-values.
+
+```{r modeling_regression}
+
+# Downward region (2010 to 2019)
+model1 <- lm(total_count ~ year_label, data = subset1)
+summary(model1)
+
+# Upward region (2017 to 2022)
+model2 <- lm(total_count ~ year_label, data = subset2)
+summary(model2)
+
+```
+
+From the summaries of these models, we can see that the trend from 2010 to 2019 was very strongly linearly decreasing.  Its p-value of 5.49E-11 indicates strong fit of the model.  In contrast, the trend from 2017 to 2022 is less firm in its fitment, having a p-value of only 0.0013.  This decreased efficacy is likely in part due to the small number of data points from 2017 to 2022, and the intense discontinuity between the total count in 2019 and 2020.  Long term analysis of 2017 to 2027 would likely show a more consistent regression model if/when such becomes an option.
+
+## Future Analysis and Bias
+
+From the above findings, the following questions are of apparent interest:
+
+* Of the shootings which occur in the peak time region identified (9:00 PM to 4:00 AM), where do they principally happen?
+* Does the peak time interval of shootings change depending on Borough?
+* Are victim demographics different across different time intervals?
+* In the peak time region, does the location of shootings concentrate around bars, nightclubs, and other areas generally associated with heavy alcohol consumption?  If so, to what degree compared to other times?
+* Shootings drastically increased between 2019 and 2020, is this increase strictly uniform, or are some Boroughs immune from this rated increase?
+* Perpetrator demographics were omitted due to the high rate of blank entries; do different types of perpetrators tend to commit shootings at differing times?
+
+Any of these questions could be the subject of a considerable analysis using this data set in a similar way to that displayed above.  Incorporation of the latitude and longitude data not utilized here also presents interesting opportunities for visualization when overlayed on a map of the city.
+
+
+While care was taken to maintain the nature of the data set, bias was both undoubtedly introduced and already present in the data.  Firstly, the data as imported lacked demographic details for perpetrators very widely.  This is likely due to such being unsolved cases where the perpetrator was never identified.  On import, the data also lacked some occurrence date/time values; such is probably due to the victim being found or treated after the incident occurred without any evidence to substantiate when it happened.  Both of these factors limit the analyses which can be performed, and bias the data towards events where resolution was swift; if a shooting happens at 9:30 PM at a busy club, many witnesses (and potentially even police officers) will be present to clarify details on the event.
+
+Additionally, columns related to location and demographics were outright disregarded in this particular analysis.  The focus here was primarily **when** events occurred both during the day and year-to-year.  This approach ignored any trends which may have been present in location or demographic details.  Luckily, omission of demographic details nearly removes any personal bias which may inform the analysis should it have been included.
+
+In all, the data set is rife with interesting insights worthy of exploration, and the above document represents a minuscule starting point towards such.
+
+
+
+
+
+
+
