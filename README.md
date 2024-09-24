@@ -1,1 +1,1 @@
-Both documents are midterm and final projects for the DSCA 5301 course I took as part of my MS in Data Science for CU.  They represent a snapshot of some of the competency I posess in the field at their time of upload.
+Any documents or files uploaded to this repository represent assignments completed as part of the MS in Data Science program I am (presently) enrolled in.
